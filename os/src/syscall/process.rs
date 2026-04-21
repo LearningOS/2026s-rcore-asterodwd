@@ -36,14 +36,19 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
 
     let time = get_time_us();
-    let t = TimeVal {
+    let time_val = TimeVal {
         sec: time / 1_000_000,
         usec: time % 1_000_000,
     };
 
     let len = core::mem::size_of::<TimeVal>();
+    let src = unsafe { core::slice::from_raw_parts(&time_val as *const TimeVal as *const u8, len) };
 
-    let user_buffer = translated_byte_buffer(current_user_token(), ts as *const u8, len);
+    let user_buffer = translated_byte_buffer(
+        current_user_token(),
+        ts as *const u8,
+        core::mem::size_of::<TimeVal>(),
+    );
 
     if user_buffer.is_empty() {
         return -1;
@@ -52,13 +57,8 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     let mut current_offset = 0_usize;
 
     for slice in user_buffer {
-        unsafe {
-            slice.copy_from_slice(core::slice::from_raw_parts(
-                (&t as *const TimeVal as *const u8).add(current_offset),
-                slice.len(),
-            ));
-            current_offset += slice.len();
-        }
+        slice.copy_from_slice(&src[current_offset..(current_offset + slice.len())]);
+        current_offset += slice.len();
     }
 
     0
