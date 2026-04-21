@@ -1,6 +1,7 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
 use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use crate::mm::address::PhysAddr;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
@@ -154,6 +155,14 @@ impl PageTable {
     /// get the token from the page table
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
+    }
+
+    /// lookup the correspond physaddr from virtaddr
+    pub fn lookup(&self, va: VirtAddr) -> Option<PhysAddr> {
+        let vpn: VirtPageNum = va.floor();
+        let ppn = self.translate(vpn)?.ppn();
+        let pa = PhysAddr::build(ppn, va.page_offset());
+        Some(pa)
     }
 }
 

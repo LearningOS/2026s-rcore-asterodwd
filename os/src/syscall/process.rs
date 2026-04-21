@@ -1,7 +1,8 @@
 //! Process management syscalls
 use crate::{
+    mm::PageTable,
     task::{
-        change_program_brk, exit_current_and_run_next, get_syscall_count,
+        change_program_brk, current_user_token, exit_current_and_run_next, get_syscall_count,
         suspend_current_and_run_next,
     },
     timer::get_time_us,
@@ -31,10 +32,20 @@ pub fn sys_yield() -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
-    let _ = get_time_us();
-    -1
+
+    let time = get_time_us();
+    let page_table = PageTable::from_token(current_user_token());
+    let pa = page_table.lookup((ts as usize).into()).unwrap();
+
+    unsafe {
+        *(pa.0 as *mut TimeVal) = TimeVal {
+            sec: time / 1_000_000,
+            usec: time % 1_000_000,
+        }
+    }
+    0
 }
 
 /// TODO: Finish sys_trace to pass testcases
@@ -43,11 +54,22 @@ pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     trace!("kernel: sys_trace");
 
     match trace_request {
-        0 => unsafe { *(id as *const u8) as isize },
+        0 => {
+            let page_table = PageTable::from_token(current_user_token());
+            let pa = page_table.lookup(id.into()).unwrap();
+
+            *pa.get_mut::<u8>() as isize
+            // unsafe { *(id as *const u8) as isize }
+        }
         2 => get_syscall_count(id) as isize,
         // TODO: not implement yet
         1 => {
-            unsafe { *(id as *mut u8) = data as u8 };
+            let page_table = PageTable::from_token(current_user_token());
+            let pa = page_table.lookup(id.into()).unwrap();
+
+            *pa.get_mut::<u8>() = data as u8;
+
+            // unsafe { *(id as *mut u8) = data as u8 };
             0
         }
         _ => unreachable!("not going to reaching here"),
