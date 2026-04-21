@@ -1,6 +1,6 @@
 //! Process management syscalls
 use crate::{
-    mm::PageTable,
+    mm::{translated_byte_buffer, PageTable},
     task::{
         change_program_brk, current_user_token, exit_current_and_run_next, get_syscall_count,
         suspend_current_and_run_next,
@@ -36,15 +36,31 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
 
     let time = get_time_us();
-    let page_table = PageTable::from_token(current_user_token());
-    let pa = page_table.lookup((ts as usize).into()).unwrap();
+    let t = TimeVal {
+        sec: time / 1_000_000,
+        usec: time % 1_000_000,
+    };
 
-    unsafe {
-        *(pa.0 as *mut TimeVal) = TimeVal {
-            sec: time / 1_000_000,
-            usec: time % 1_000_000,
+    let len = core::mem::size_of::<TimeVal>();
+
+    let user_buffer = translated_byte_buffer(current_user_token(), ts as *const u8, len);
+
+    if user_buffer.is_empty() {
+        return -1;
+    }
+
+    let mut current_offset = 0_usize;
+
+    for slice in user_buffer {
+        unsafe {
+            slice.copy_from_slice(core::slice::from_raw_parts(
+                (&t as *const TimeVal as *const u8).add(current_offset),
+                slice.len(),
+            ));
+            current_offset += slice.len();
         }
     }
+
     0
 }
 
