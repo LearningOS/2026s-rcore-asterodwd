@@ -63,6 +63,52 @@ impl MemorySet {
             None,
         );
     }
+    /// check if target vpn conflicts before insert.
+    pub fn try_insert_framed_area(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) -> bool {
+        let new_area = MapArea::new(start_va, end_va, MapType::Framed, permission);
+
+        for area in &self.areas {
+            if !new_area.check_noconflict(area) {
+                debug!(
+                    "target MapArea from {:?} to {:?} already exists",
+                    start_va, end_va
+                );
+                return false;
+            }
+        }
+
+        self.push(new_area, None);
+
+        true
+    }
+
+    /// find the exact same maparea and unmap it
+    pub fn try_unmap(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start = start_va.floor();
+        let end = end_va.ceil();
+        if let Some(idx) = self.areas.iter().position(|area| {
+            debug!(
+                "looking for vpn range: [{:?}-{:?}), got :[{:?}-{:?})",
+                start,
+                end,
+                area.vpn_range.get_start(),
+                area.vpn_range.get_end()
+            );
+            area.vpn_range.get_start() == start && area.vpn_range.get_end() == end
+        }) {
+            let mut area = self.areas.remove(idx);
+            area.unmap(&mut self.page_table);
+            true
+        } else {
+            false
+        }
+    }
+
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
@@ -356,6 +402,15 @@ impl MapArea {
             current_vpn.step();
         }
     }
+    pub fn check_noconflict(&self, other: &MapArea) -> bool {
+        let s1 = self.vpn_range.get_start();
+        let e1 = self.vpn_range.get_end();
+
+        let s2 = other.vpn_range.get_start();
+        let e2 = other.vpn_range.get_end();
+
+        e1 <= s2 || e2 <= s1
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -372,7 +427,7 @@ bitflags! {
         const R = 1 << 1;
         ///Writable
         const W = 1 << 2;
-        ///Excutable
+        ///Executable
         const X = 1 << 3;
         ///Accessible in U mode
         const U = 1 << 4;

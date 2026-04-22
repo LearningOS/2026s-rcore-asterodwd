@@ -44,6 +44,56 @@ impl TaskControlBlock {
     pub fn get_user_token(&self) -> usize {
         self.memory_set.token()
     }
+
+    /// memory map in current task. The function check if start_va is aligned and prot is valid.
+    /// Before insert into memory_set, it will check if the mapareas are conflict.
+    pub fn do_mmap(&mut self, start_va: usize, len: usize, prot: usize) -> isize {
+        // TODO: let's reconsider this later
+
+        if len == 0 {
+            // succeed, but doesn't allocate any memory indeed
+            return 0;
+        }
+
+        let start_va = VirtAddr::from(start_va);
+
+        // start_va must be aligned, and prot must be valid
+        if !start_va.aligned() || prot & !0x7 != 0 || prot & 0x7 == 0 {
+            return -1;
+        }
+        let perm = MapPermission::from_bits((prot << 1) as u8).unwrap();
+        let end_va = VirtAddr::from(start_va.0 + len);
+
+        if self
+            .memory_set
+            .try_insert_framed_area(start_va, end_va, perm)
+        {
+            0
+        } else {
+            -1
+        }
+    }
+
+    /// memory unmap, the start and end must be the same with when it was allocated
+    pub fn do_munmap(&mut self, start: usize, len: usize) -> isize {
+        if len == 0 {
+            return 0;
+        }
+
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len);
+
+        if !start_va.aligned() {
+            return -1;
+        };
+
+        if self.memory_set.try_unmap(start_va, end_va) {
+            0
+        } else {
+            -1
+        }
+    }
+
     /// Based on the elf info in program, build the contents of task in a new address space
     pub fn new(elf_data: &[u8], app_id: usize) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
