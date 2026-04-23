@@ -61,7 +61,7 @@ impl TaskControlBlock {
         if !start_va.aligned() || prot & !0x7 != 0 || prot & 0x7 == 0 {
             return -1;
         }
-        let perm = MapPermission::from_bits((prot << 1) as u8).unwrap();
+        let perm = MapPermission::from_bits((prot << 1) as u8).unwrap() | MapPermission::U;
         let end_va = VirtAddr::from(start_va.0 + len);
 
         if self

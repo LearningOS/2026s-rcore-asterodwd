@@ -164,11 +164,15 @@ impl PageTable {
     }
 
     /// lookup the correspond physaddr from virtaddr
-    pub fn lookup(&self, va: VirtAddr) -> Option<PhysAddr> {
+    pub fn lookup(&self, va: VirtAddr, required_permission: PTEFlags) -> Option<PhysAddr> {
         let vpn: VirtPageNum = va.floor();
-        let ppn = self.translate(vpn)?.ppn();
-        let pa = PhysAddr::build(ppn, va.page_offset());
-        Some(pa)
+        let pte = self.translate(vpn)?;
+        if pte.flags().contains(required_permission | PTEFlags::U) {
+            let pa = PhysAddr::build(pte.ppn(), va.page_offset());
+            Some(pa)
+        } else {
+            None
+        }
     }
 }
 

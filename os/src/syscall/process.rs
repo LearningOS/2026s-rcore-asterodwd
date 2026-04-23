@@ -1,6 +1,6 @@
 //! Process management syscalls
 use crate::{
-    mm::{translated_byte_buffer, PageTable},
+    mm::{translated_byte_buffer, PTEFlags, PageTable},
     task::{
         change_program_brk, current_user_token, do_mmap, do_munmap, exit_current_and_run_next,
         get_syscall_count, suspend_current_and_run_next,
@@ -72,21 +72,26 @@ pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     match trace_request {
         0 => {
             let page_table = PageTable::from_token(current_user_token());
-            let pa = page_table.lookup(id.into()).unwrap();
+            if let Some(pa) = page_table.lookup(id.into(), PTEFlags::R) {
+                *pa.get_mut::<u8>() as isize
+            } else {
+                -1
+            }
 
-            *pa.get_mut::<u8>() as isize
             // unsafe { *(id as *const u8) as isize }
         }
         2 => get_syscall_count(id) as isize,
         // TODO: not implement yet
         1 => {
             let page_table = PageTable::from_token(current_user_token());
-            let pa = page_table.lookup(id.into()).unwrap();
-
-            *pa.get_mut::<u8>() = data as u8;
+            if let Some(pa) = page_table.lookup(id.into(), PTEFlags::W) {
+                *pa.get_mut::<u8>() = data as u8;
+                0
+            } else {
+                -1
+            }
 
             // unsafe { *(id as *mut u8) = data as u8 };
-            0
         }
         _ => unreachable!("not going to reaching here"),
     }
