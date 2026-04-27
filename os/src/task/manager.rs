@@ -9,6 +9,11 @@ pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 /// A simple FIFO scheduler.
 impl TaskManager {
     ///Creat an empty TaskManager

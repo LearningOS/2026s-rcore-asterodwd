@@ -2,7 +2,7 @@
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
@@ -84,6 +84,55 @@ impl TaskControlBlockInner {
     }
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
+    }
+
+    /// memory unmap, the start and end must be the same with when it was allocated
+    pub fn do_munmap(&mut self, start: usize, len: usize) -> isize {
+        if len == 0 {
+            return 0;
+        }
+
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len);
+
+        if !start_va.aligned() {
+            return -1;
+        };
+
+        if self.memory_set.try_unmap(start_va, end_va) {
+            0
+        } else {
+            -1
+        }
+    }
+
+    /// memory map in current task. The function check if start_va is aligned and prot is valid.
+    /// Before insert into memory_set, it will check if the mapareas are conflict.
+    pub fn do_mmap(&mut self, start_va: usize, len: usize, prot: usize) -> isize {
+        // TODO: let's reconsider this later
+
+        if len == 0 {
+            // succeed, but doesn't allocate any memory indeed
+            return 0;
+        }
+
+        let start_va = VirtAddr::from(start_va);
+
+        // start_va must be aligned, and prot must be valid
+        if !start_va.aligned() || prot & !0x7 != 0 || prot & 0x7 == 0 {
+            return -1;
+        }
+        let perm = MapPermission::from_bits((prot << 1) as u8).unwrap() | MapPermission::U;
+        let end_va = VirtAddr::from(start_va.0 + len);
+
+        if self
+            .memory_set
+            .try_insert_framed_area(start_va, end_va, perm)
+        {
+            0
+        } else {
+            -1
+        }
     }
 }
 
@@ -235,6 +284,18 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// do mmap for current process
+    pub fn do_mmap(&self, start: usize, len: usize, prot: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        inner.do_mmap(start, len, prot)
+    }
+
+    /// do m unmap for current process
+    pub fn do_munmap(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        inner.do_munmap(start, len)
     }
 }
 
