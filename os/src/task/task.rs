@@ -8,6 +8,36 @@ use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use core::cmp::Ordering;
+
+const BIG_STRIDE: u64 = u64::MAX - 1;
+
+#[derive(Default, Copy, Clone, Debug)]
+pub struct Stride(u64);
+
+impl PartialEq for Stride {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+
+impl Eq for Stride {}
+
+impl Ord for Stride {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if (self.0.wrapping_sub(other.0) as isize) < 0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }
+    }
+}
+
+impl PartialOrd for Stride {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 /// Task control block structure
 ///
@@ -33,6 +63,28 @@ impl TaskControlBlock {
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
+    }
+}
+
+impl PartialEq for TaskControlBlock {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+impl Eq for TaskControlBlock {}
+
+impl PartialOrd for TaskControlBlock {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(other.cmp(self))
+    }
+}
+
+impl Ord for TaskControlBlock {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let s1 = self.inner_exclusive_access().stride;
+        let s2 = other.inner_exclusive_access().stride;
+
+        s1.cmp(&s2)
     }
 }
 
@@ -68,6 +120,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// stride object for scheduling
+    pub stride: Stride,
+
+    /// process priority
+    pub priority: u64,
 }
 
 impl TaskControlBlockInner {
@@ -84,6 +142,15 @@ impl TaskControlBlockInner {
     }
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
+    }
+
+    /// prio should be greater equal than 2, this is checked in syscall
+    pub fn set_priority(&mut self, prio: isize) {
+        self.priority = prio as u64;
+    }
+
+    pub fn increase_stride(&mut self) {
+        self.stride.0 += BIG_STRIDE / self.priority;
     }
 
     /// memory unmap, the start and end must be the same with when it was allocated
@@ -167,6 +234,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 16,
+                    stride: Stride::default(),
                 })
             },
         };
@@ -240,6 +309,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: 16,
+                    stride: Stride::default(),
                 })
             },
         });
@@ -326,6 +397,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: 16,
+                    stride: Stride::default(),
                 })
             },
         });
