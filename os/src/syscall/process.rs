@@ -171,12 +171,23 @@ pub fn sys_sbrk(size: i32) -> isize {
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(path: *const u8) -> isize {
     trace!("implementing spawn");
+
     let token = current_user_token();
+    let path = translated_str(token, path);
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
+        let new_task = current_task().unwrap().do_spawn(data).unwrap();
 
-    let app_name = translated_str(token, path);
+        let new_pid = new_task.pid.0;
+        // modify trap context of new_task, because it returns immediately after switching
+        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+        // we do not have to move to next instruction since we have done it before
+        // for child process, fork returns 0
+        trap_cx.x[10] = 0;
+        // add new task to scheduler
+        add_task(new_task);
+        new_pid as isize
 
-    if let Some(data) = get_app_data_by_name(&app_name) {
-        current_task().unwrap().do_spawn(data)
+        // here do the spawn
     } else {
         -1
     }
