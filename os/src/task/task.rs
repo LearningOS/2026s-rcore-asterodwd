@@ -3,13 +3,44 @@ use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
 use crate::fs::{File, Stdin, Stdout};
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+
+use core::cmp::Ordering;
+
+const BIG_STRIDE: u64 = u64::MAX - 1;
+
+#[derive(Default, Copy, Clone, Debug)]
+pub struct Stride(u64);
+
+impl PartialEq for Stride {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+
+impl Eq for Stride {}
+
+impl Ord for Stride {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if (self.0.wrapping_sub(other.0) as isize) < 0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }
+    }
+}
+
+impl PartialOrd for Stride {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 /// Task control block structure
 ///
@@ -35,6 +66,28 @@ impl TaskControlBlock {
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
+    }
+}
+
+impl PartialEq for TaskControlBlock {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+impl Eq for TaskControlBlock {}
+
+impl PartialOrd for TaskControlBlock {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(other.cmp(self))
+    }
+}
+
+impl Ord for TaskControlBlock {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let s1 = self.inner_exclusive_access().stride;
+        let s2 = other.inner_exclusive_access().stride;
+
+        s1.cmp(&s2)
     }
 }
 
@@ -71,6 +124,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// stride object for scheduling
+    pub stride: Stride,
+
+    /// process priority
+    pub priority: u64,
 }
 
 impl TaskControlBlockInner {
@@ -92,6 +151,64 @@ impl TaskControlBlockInner {
         } else {
             self.fd_table.push(None);
             self.fd_table.len() - 1
+        }
+    }
+
+    /// prio should be greater equal than 2, this is checked in syscall
+    pub fn set_priority(&mut self, prio: isize) {
+        self.priority = prio as u64;
+    }
+
+    pub fn increase_stride(&mut self) {
+        self.stride.0 += BIG_STRIDE / self.priority;
+    }
+
+    /// memory unmap, the start and end must be the same with when it was allocated
+    pub fn do_munmap(&mut self, start: usize, len: usize) -> isize {
+        if len == 0 {
+            return 0;
+        }
+
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len);
+
+        if !start_va.aligned() {
+            return -1;
+        };
+
+        if self.memory_set.try_unmap(start_va, end_va) {
+            0
+        } else {
+            -1
+        }
+    }
+
+    /// memory map in current task. The function check if start_va is aligned and prot is valid.
+    /// Before insert into memory_set, it will check if the mapareas are conflict.
+    pub fn do_mmap(&mut self, start_va: usize, len: usize, prot: usize) -> isize {
+        // TODO: let's reconsider this later
+
+        if len == 0 {
+            // succeed, but doesn't allocate any memory indeed
+            return 0;
+        }
+
+        let start_va = VirtAddr::from(start_va);
+
+        // start_va must be aligned, and prot must be valid
+        if !start_va.aligned() || prot & !0x7 != 0 || prot & 0x7 == 0 {
+            return -1;
+        }
+        let perm = MapPermission::from_bits((prot << 1) as u8).unwrap() | MapPermission::U;
+        let end_va = VirtAddr::from(start_va.0 + len);
+
+        if self
+            .memory_set
+            .try_insert_framed_area(start_va, end_va, perm)
+        {
+            0
+        } else {
+            -1
         }
     }
 }
@@ -135,6 +252,9 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+
+                    priority: 16,
+                    stride: Stride::default(),
                 })
             },
         };
@@ -216,6 +336,9 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+
+                    priority: 16,
+                    stride: Stride::default(),
                 })
             },
         });
@@ -260,6 +383,78 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// do mmap for current process
+    pub fn do_mmap(&self, start: usize, len: usize, prot: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        inner.do_mmap(start, len, prot)
+    }
+
+    /// do m unmap for current process
+    pub fn do_munmap(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        inner.do_munmap(start, len)
+    }
+
+    /// do spawn
+    pub fn do_spawn(self: &Arc<Self>, elf_data: &[u8]) -> Result<Arc<Self>, isize> {
+        let mut parent_inner = self.inner_exclusive_access();
+
+        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let trap_cx_ppn = memory_set
+            .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
+            .unwrap()
+            .ppn();
+
+        let pid_handle = pid_alloc();
+        let kernel_stack = kstack_alloc();
+        let kernel_stack_top = kernel_stack.get_top();
+        let task_control_block = Arc::new(TaskControlBlock {
+            pid: pid_handle,
+            kernel_stack,
+            inner: unsafe {
+                UPSafeCell::new(TaskControlBlockInner {
+                    trap_cx_ppn,
+                    base_size: user_sp,
+                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                    task_status: TaskStatus::Ready,
+                    memory_set,
+                    parent: Some(Arc::downgrade(self)),
+                    children: Vec::new(),
+                    exit_code: 0,
+                    heap_bottom: parent_inner.heap_bottom,
+                    program_brk: parent_inner.program_brk,
+                    priority: 16,
+                    stride: Stride::default(),
+                    fd_table: vec![
+                        // 0 -> stdin
+                        Some(Arc::new(Stdin)),
+                        // 1 -> stdout
+                        Some(Arc::new(Stdout)),
+                        // 2 -> stderr
+                        Some(Arc::new(Stdout)),
+                    ],
+                })
+            },
+        });
+        // add child
+        parent_inner.children.push(task_control_block.clone());
+        // modify kernel_sp in trap_cx
+        // **** access child PCB exclusively
+        let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
+
+        *trap_cx = TrapContext::app_init_context(
+            entry_point,
+            user_sp,
+            KERNEL_SPACE.exclusive_access().token(),
+            kernel_stack_top,
+            trap_handler as usize,
+        );
+        // return
+        Ok(task_control_block)
+        // **** release child PCB
+        // ---- release parent PCB
     }
 }
 

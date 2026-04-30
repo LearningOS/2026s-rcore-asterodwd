@@ -1,14 +1,20 @@
 //!Implementation of [`TaskManager`]
 use super::TaskControlBlock;
 use crate::sync::UPSafeCell;
-use alloc::collections::VecDeque;
+use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::sync::Arc;
 use lazy_static::*;
+
 ///A array of `TaskControlBlock` that is thread-safe
 pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 /// A simple FIFO scheduler.
 impl TaskManager {
     ///Creat an empty TaskManager
@@ -27,10 +33,34 @@ impl TaskManager {
     }
 }
 
+pub struct StrideTaskManager {
+    ready_queue: BinaryHeap<Arc<TaskControlBlock>>,
+}
+
+/// A Stride base scheduler
+impl StrideTaskManager {
+    pub fn new() -> Self {
+        Self {
+            ready_queue: BinaryHeap::new(),
+        }
+    }
+
+    pub fn add(&mut self, task: Arc<TaskControlBlock>) {
+        self.ready_queue.push(task);
+    }
+
+    pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
+        debug!("fetching task");
+        let task = self.ready_queue.pop().unwrap();
+        task.inner_exclusive_access().increase_stride();
+        Some(task)
+    }
+}
+
 lazy_static! {
     /// TASK_MANAGER instance through lazy_static!
-    pub static ref TASK_MANAGER: UPSafeCell<TaskManager> =
-        unsafe { UPSafeCell::new(TaskManager::new()) };
+    pub static ref TASK_MANAGER: UPSafeCell<StrideTaskManager> =
+        unsafe { UPSafeCell::new(StrideTaskManager::new()) };
 }
 
 /// Add process to ready queue

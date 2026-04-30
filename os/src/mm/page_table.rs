@@ -70,6 +70,12 @@ pub struct PageTable {
     frames: Vec<FrameTracker>,
 }
 
+impl Default for PageTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Assume that it won't oom when creating/mapping.
 impl PageTable {
     /// Create a new page table
@@ -156,6 +162,18 @@ impl PageTable {
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
     }
+
+    // /// lookup the correspond physaddr from virtaddr
+    // pub fn lookup(&self, va: VirtAddr, required_permission: PTEFlags) -> Option<PhysAddr> {
+    //     let vpn: VirtPageNum = va.floor();
+    //     let pte = self.translate(vpn)?;
+    //     if pte.flags().contains(required_permission | PTEFlags::U) {
+    //         let pa = PhysAddr::build(pte.ppn(), va.page_offset());
+    //         Some(pa)
+    //     } else {
+    //         None
+    //     }
+    // }
 }
 
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
