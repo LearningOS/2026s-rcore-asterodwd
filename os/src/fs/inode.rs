@@ -5,9 +5,9 @@
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
 use super::File;
-use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
+use crate::{drivers::BLOCK_DEVICE, fs::Stat};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitflags::*;
@@ -136,7 +136,7 @@ impl File for OSInode {
         let mut inner = self.inner.exclusive_access();
         let mut total_read_size = 0usize;
         for slice in buf.buffers.iter_mut() {
-            let read_size = inner.inode.read_at(inner.offset, *slice);
+            let read_size = inner.inode.read_at(inner.offset, slice);
             if read_size == 0 {
                 break;
             }
@@ -149,11 +149,22 @@ impl File for OSInode {
         let mut inner = self.inner.exclusive_access();
         let mut total_write_size = 0usize;
         for slice in buf.buffers.iter() {
-            let write_size = inner.inode.write_at(inner.offset, *slice);
+            let write_size = inner.inode.write_at(inner.offset, slice);
             assert_eq!(write_size, slice.len());
             inner.offset += write_size;
             total_write_size += write_size;
         }
         total_write_size
+    }
+
+    fn stat(&self, stat: &mut Stat) -> isize {
+        let inner = self.inner.exclusive_access();
+        stat.ino = inner.inode.get_inode_id() as u64;
+        // this field should be saved on inode, we will change this in next chapter
+        stat.mode = super::StatMode::FILE;
+        // change this in next question
+        stat.nlink = 1;
+
+        0
     }
 }
