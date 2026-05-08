@@ -214,4 +214,49 @@ impl Inode {
     pub fn get_inode_id(&self) -> u32 {
         self.inode_id
     }
+
+    /// create a hard link for the given source file
+    pub fn create_hard_link(&self, src_name: &str, dst_name: &str) -> Result<isize, &'static str> {
+        let mut fs = self.fs.lock();
+        let op = |root_inode: &DiskInode| {
+            assert!(root_inode.is_dir());
+
+            self.find_inode_id(dst_name, root_inode)
+        };
+
+        if self.read_disk_inode(op).is_some() {
+            return Err("target file already exists");
+        }
+
+        let node_id = self
+            .read_disk_inode(|root_inode: &DiskInode| self.find_inode_id(src_name, root_inode))
+            .ok_or("source file doesn't exist")?;
+
+        self.modify_disk_inode(|root_inode| {
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+
+            self.increase_size(new_size as u32, root_inode, &mut fs);
+
+            let dirent = DirEntry::new(dst_name, node_id);
+
+            root_inode.write_at(
+                file_count * DIRENT_SZ,
+                dirent.as_bytes(),
+                &self.block_device,
+            );
+        });
+
+        // let (block_id, block_offset) = fs.get_disk_inode_pos(node_id);
+        block_cache_sync_all();
+        Ok(0)
+        // Some(Arc::new(Self::new(
+        //     block_id,
+        //     block_offset,
+        //     self.fs.clone(),
+        //     self.block_device.clone(),
+        //     node_id,
+        // )))
+    }
+
 }
