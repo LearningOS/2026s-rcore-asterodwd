@@ -136,6 +136,17 @@ pub fn link_file(src: &str, dst: &str) -> isize {
     }
 }
 
+/// unlink the specified file
+pub fn unlink_file(file_name: &str) -> isize {
+    match ROOT_INODE.remove_hard_link(file_name) {
+        Ok(v) => v,
+        Err(msg) => {
+            print!("{}", msg);
+            -1
+        }
+    }
+}
+
 impl File for OSInode {
     fn readable(&self) -> bool {
         self.readable
@@ -174,7 +185,7 @@ impl File for OSInode {
         // this field should be saved on inode, we will change this in next chapter
         stat.mode = super::StatMode::FILE;
         // change this in next question
-        stat.nlink = 1;
+        stat.nlink = ROOT_INODE.count_nlink(stat.ino as u32);
 
         0
     }

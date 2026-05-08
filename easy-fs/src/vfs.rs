@@ -5,6 +5,7 @@ use super::{
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use log::debug;
 use spin::{Mutex, MutexGuard};
 /// Virtual filesystem layer over easy-fs
 pub struct Inode {
@@ -215,6 +216,30 @@ impl Inode {
         self.inode_id
     }
 
+    /// Get inode nlink from Root node
+    pub fn count_nlink(&self, inode_id: u32) -> u32 {
+        let mut _fs = self.fs.lock();
+        let mut cnt = 0;
+        self.read_disk_inode(|root_inode: &DiskInode| {
+            assert!(root_inode.is_dir());
+
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+
+            for i in 0..file_count {
+                assert_eq!(
+                    root_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device,),
+                    DIRENT_SZ,
+                );
+                if dirent.inode_id() == inode_id {
+                    cnt += 1;
+                }
+            }
+        });
+
+        cnt
+    }
+
     /// create a hard link for the given source file
     pub fn create_hard_link(&self, src_name: &str, dst_name: &str) -> Result<isize, &'static str> {
         let mut fs = self.fs.lock();
@@ -259,4 +284,67 @@ impl Inode {
         // )))
     }
 
+    /// remove a hard link from fs
+    pub fn remove_hard_link(&self, name: &str) -> Result<isize, &'static str> {
+        let mut fs = self.fs.lock();
+        let mut found = false;
+
+        self.modify_disk_inode(|root_inode| {
+            assert!(root_inode.is_dir());
+
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count - 1) * DIRENT_SZ;
+
+            for file_idx in (0..file_count).rev() {
+                let mut dirent = DirEntry::empty();
+                assert_eq!(
+                    root_inode.read_at(
+                        DIRENT_SZ * file_idx,
+                        dirent.as_bytes_mut(),
+                        &self.block_device,
+                    ),
+                    DIRENT_SZ,
+                );
+
+                if dirent.name() == name {
+                    debug!(
+                        "found inode with name {}, current idx: {}, total file_count: {}",
+                        dirent.name(),
+                        file_idx,
+                        file_count
+                    );
+                    if file_idx != file_count - 1 {
+                        let mut last_dirent = DirEntry::empty();
+                        assert_eq!(
+                            root_inode.read_at(
+                                DIRENT_SZ * (file_count - 1),
+                                last_dirent.as_bytes_mut(),
+                                &self.block_device,
+                            ),
+                            DIRENT_SZ,
+                        );
+
+                        root_inode.write_at(
+                            DIRENT_SZ * file_idx,
+                            last_dirent.as_bytes(),
+                            &self.block_device,
+                        );
+                        debug!("success swap dirent with the last");
+                    }
+
+                    // anyway, we found a file with the same name
+                    found = true;
+                    self.decrease_size(new_size as u32, root_inode, &mut fs);
+                    break;
+                }
+            }
+        });
+
+        if found {
+            block_cache_sync_all();
+            Ok(0)
+        } else {
+            Err("target file doesn't exist")
+        }
+    }
 }
