@@ -2,6 +2,7 @@ use super::{get_block_cache, BlockDevice, BLOCK_SZ};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter, Result};
+use core::mem;
 
 /// Magic number for sanity check
 const EFS_MAGIC: u32 = 0x3b800001;
@@ -160,6 +161,98 @@ impl DiskInode {
                     indirect1[last % INODE_INDIRECT1_COUNT]
                 })
         }
+    }
+    pub fn decrease_size(
+        &mut self,
+        new_size: u32,
+        block_device: &Arc<dyn BlockDevice>,
+    ) -> Vec<u32> {
+        let mut ret: Vec<u32> = Vec::new();
+        // keeps track of data blocks, not total blocks
+        let mut current_blocks = self.data_blocks();
+
+        self.size = new_size;
+        let expected_count = self.data_blocks();
+
+        while expected_count < current_blocks {
+            if current_blocks > INDIRECT1_BOUND as u32 {
+                let level2_count = current_blocks - INDIRECT1_BOUND as u32;
+                let indirect1_pos = (level2_count - 1) / INODE_INDIRECT1_COUNT as u32;
+                let indirect1_offset = (level2_count - 1) % INODE_INDIRECT1_COUNT as u32;
+
+                let can_remove = (indirect1_offset + 1).min(current_blocks - expected_count);
+
+                get_block_cache(self.indirect2 as usize, Arc::clone(block_device))
+                    .lock()
+                    .modify(0, |indirect2: &mut IndirectBlock| {
+                        get_block_cache(
+                            indirect2[indirect1_pos as usize] as usize,
+                            Arc::clone(block_device),
+                        )
+                        .lock()
+                        .modify(0, |indirect1: &mut IndirectBlock| {
+                            let start = indirect1_offset + 1 - can_remove;
+                            let end = indirect1_offset;
+
+                            for i in (start..=end).rev() {
+                                let block_id = mem::replace(&mut indirect1[i as usize], 0);
+                                ret.push(block_id);
+                            }
+                        });
+
+                        if can_remove == indirect1_offset + 1 {
+                            let indirect1_bid =
+                                mem::replace(&mut indirect2[indirect1_pos as usize], 0);
+                            ret.push(indirect1_bid);
+                        }
+                    });
+
+                current_blocks -= can_remove;
+
+                if current_blocks == INDIRECT1_BOUND as u32 {
+                    let indirect2_block_id = mem::replace(&mut self.indirect2, 0);
+                    ret.push(indirect2_block_id);
+                }
+            } else if current_blocks > DIRECT_BOUND as u32 {
+                let level1_count = current_blocks - DIRECT_BOUND as u32;
+                let offset = level1_count - 1;
+
+                let can_remove = (offset + 1).min(current_blocks - expected_count);
+
+                get_block_cache(self.indirect1 as usize, Arc::clone(block_device))
+                    .lock()
+                    .modify(0, |indirect: &mut IndirectBlock| {
+                        let start = offset + 1 - can_remove;
+                        let end = offset;
+
+                        for i in (start..=end).rev() {
+                            let block_id = mem::replace(&mut indirect[i as usize], 0);
+                            ret.push(block_id);
+                        }
+                    });
+                current_blocks -= can_remove;
+
+                if current_blocks == DIRECT_BOUND as u32 {
+                    let block_id = mem::replace(&mut self.indirect1, 0);
+                    ret.push(block_id);
+                }
+            } else {
+                let offset = current_blocks - 1;
+
+                let can_remove = (offset + 1).min(current_blocks - expected_count);
+                let start = offset + 1 - can_remove;
+                let end = offset;
+
+                for i in (start..=end).rev() {
+                    let block_id = mem::replace(&mut self.direct[i as usize], 0);
+                    ret.push(block_id);
+                }
+
+                current_blocks -= can_remove;
+            }
+        }
+
+        ret
     }
     /// Inncrease the size of current disk inode
     pub fn increase_size(

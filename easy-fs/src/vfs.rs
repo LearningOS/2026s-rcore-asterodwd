@@ -95,6 +95,26 @@ impl Inode {
         }
         disk_inode.increase_size(new_size, v, &self.block_device);
     }
+
+    fn decrease_size(
+        &self,
+        new_size: u32,
+        disk_inode: &mut DiskInode,
+        fs: &mut MutexGuard<EasyFileSystem>,
+    ) {
+        if new_size >= disk_inode.size {
+            return;
+        }
+
+        let blocks_to_revoke = disk_inode.decrease_size(new_size, &self.block_device);
+
+        blocks_to_revoke
+            .into_iter()
+            // don't touch super block
+            .filter(|&id| id != 0)
+            .for_each(|id| fs.dealloc_data(id));
+    }
+
     /// Create inode under current inode by name
     pub fn create(&self, name: &str) -> Option<Arc<Inode>> {
         let mut fs = self.fs.lock();
