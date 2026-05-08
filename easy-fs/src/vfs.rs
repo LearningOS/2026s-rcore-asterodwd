@@ -5,7 +5,6 @@ use super::{
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use log::debug;
 use spin::{Mutex, MutexGuard};
 /// Virtual filesystem layer over easy-fs
 pub struct Inode {
@@ -307,12 +306,6 @@ impl Inode {
                 );
 
                 if dirent.name() == name {
-                    debug!(
-                        "found inode with name {}, current idx: {}, total file_count: {}",
-                        dirent.name(),
-                        file_idx,
-                        file_count
-                    );
                     if file_idx != file_count - 1 {
                         let mut last_dirent = DirEntry::empty();
                         assert_eq!(
@@ -329,7 +322,6 @@ impl Inode {
                             last_dirent.as_bytes(),
                             &self.block_device,
                         );
-                        debug!("success swap dirent with the last");
                     }
 
                     // anyway, we found a file with the same name
