@@ -125,6 +125,17 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     }
 }
 
+/// create a hard link in fs
+pub fn link_file(src: &str, dst: &str) -> isize {
+    match ROOT_INODE.create_hard_link(src, dst) {
+        Ok(v) => v,
+        Err(msg) => {
+            print!("{}", msg);
+            -1
+        }
+    }
+}
+
 impl File for OSInode {
     fn readable(&self) -> bool {
         self.readable
