@@ -1,7 +1,7 @@
 use crate::sync::{Condvar, Mutex, MutexBlocking, MutexSpin, Semaphore};
-use crate::task::{block_current_and_run_next, current_process, current_task};
+use crate::task::{block_current_and_run_next, current_process, current_task, ProcessControlBlock};
 use crate::timer::{add_timer, get_time_ms};
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 /// sleep syscall
 pub fn sys_sleep(ms: usize) -> isize {
     trace!(
@@ -57,24 +57,78 @@ pub fn sys_mutex_create(blocking: bool) -> isize {
 }
 /// mutex lock syscall
 pub fn sys_mutex_lock(mutex_id: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] tid[{}] sys_mutex_lock",
-        current_task().unwrap().process.upgrade().unwrap().getpid(),
-        current_task()
+    // trace!(
+    //     "kernel:pid[{}] tid[{}] sys_mutex_lock",
+    //     current_task().unwrap().process.upgrade().unwrap().getpid(),
+    //     current_task()
+    //         .unwrap()
+    //         .inner_exclusive_access()
+    //         .res
+    //         .as_ref()
+    //         .unwrap()
+    //         .tid
+    // );
+    let process = current_process();
+    let (mutex, detect_deadlock) = {
+        let process_inner = process.inner_exclusive_access();
+        let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
+        (mutex, process_inner.detece_deadlock)
+    };
+
+    trace!("detece_deadlock = {}", detect_deadlock);
+    if detect_deadlock {
+        let tid = current_task()
             .unwrap()
             .inner_exclusive_access()
             .res
             .as_ref()
             .unwrap()
-            .tid
-    );
-    let process = current_process();
-    let process_inner = process.inner_exclusive_access();
-    let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
-    drop(process_inner);
+            .tid;
+
+        trace!("tid: {}", tid);
+        trace!("before check deadlock");
+        if check_mutex_deadlock(tid, &process, mutex_id) {
+            return -0xdead;
+        }
+        trace!("end check deadlock");
+    }
+
     drop(process);
+    trace!("before mutext lock");
     mutex.lock();
+    trace!("end lock");
     0
+}
+
+fn check_mutex_deadlock(tid: usize, process: &Arc<ProcessControlBlock>, lock_id: usize) -> bool {
+    let process_inner = process.inner_exclusive_access();
+    let lock_table = process_inner.mutex_list.clone();
+    drop(process_inner);
+
+    let lock_table: Vec<_> = lock_table.iter().flatten().collect();
+
+    let mut owner_list = lock_table[lock_id].get_owner();
+
+    debug!("i'am here");
+    // in fact, there is at most one owner!
+    while let Some(&owner_tid) = owner_list.first() {
+        println!("i'am here2.0");
+        if owner_tid == tid {
+            return true;
+        }
+
+        println!("i'am here2");
+        if let Some(&next_lock) = lock_table
+            .iter()
+            .find(|item| item.get_wait_list().contains(&owner_tid))
+        {
+            owner_list = next_lock.get_owner();
+        } else {
+            break;
+        }
+    }
+
+    false
 }
 /// mutex unlock syscall
 pub fn sys_mutex_unlock(mutex_id: usize) -> isize {
@@ -247,5 +301,10 @@ pub fn sys_condvar_wait(condvar_id: usize, mutex_id: usize) -> isize {
 /// YOUR JOB: Implement deadlock detection, but might not all in this syscall
 pub fn sys_enable_deadlock_detect(_enabled: usize) -> isize {
     trace!("kernel: sys_enable_deadlock_detect NOT IMPLEMENTED");
-    -1
+
+    let process = current_process();
+    let mut process_inner = process.inner_exclusive_access();
+
+    process_inner.detece_deadlock = true;
+    0
 }
