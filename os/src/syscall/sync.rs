@@ -217,59 +217,83 @@ pub fn sys_semaphore_down(sem_id: usize) -> isize {
             .tid
     );
     let process = current_process();
-    let (sem, detect_deadlock) = {
+    let (sem, detect_deadlock, lock_table) = {
         let process_inner = process.inner_exclusive_access();
         (
             Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap()),
             process_inner.detece_deadlock,
+            process_inner.semaphore_list.clone(),
         )
     };
 
+    let task = current_task().unwrap();
     if detect_deadlock {
-        let tid = current_task()
-            .unwrap()
-            .inner_exclusive_access()
-            .res
-            .as_ref()
-            .unwrap()
-            .tid;
-        if check_semaphore_deadlock(tid, &process, sem_id) {
+        let mut task_inner = task.inner_exclusive_access();
+
+        let tid = task_inner.res.as_ref().unwrap().tid;
+
+        task_inner.sema_id_waiting_on = Some(sem_id);
+        drop(task_inner);
+
+        if check_semaphore_deadlock(tid, sem_id, &lock_table) {
+            let mut task_inner = task.inner_exclusive_access();
+            task_inner.sema_id_waiting_on = None;
+            println!("detected!!!!!!!!!");
             return -0xdead;
         }
     }
 
     sem.down();
+
+    if detect_deadlock {
+        task.inner_exclusive_access().sema_id_waiting_on = None;
+    }
     0
 }
 
-fn check_semaphore_deadlock(tid: usize, process: &Arc<ProcessControlBlock>, sem_id: usize) -> bool {
+fn check_semaphore_deadlock(
+    tid: usize,
+    sem_id: usize,
+    lock_table: &[Option<Arc<Semaphore>>],
+) -> bool {
     let mut visited_threads: BTreeSet<usize> = BTreeSet::new();
+    let mut stack = Vec::new();
+    stack.push(sem_id);
 
-    let process_inner = process.inner_exclusive_access();
-    let lock_table = process_inner.semaphore_list.clone();
+    while let Some(sem_id) = stack.pop() {
+        // I think there must be a semaphore with the sem_id
+        let sem_obj = lock_table[sem_id].as_ref().unwrap();
+        let own_list = sem_obj.get_owner();
 
-    let lock_table: Vec<_> = lock_table.clone().into_iter().flatten().collect();
+        for owner_tid in own_list {
+            if tid == owner_tid {
+                return true;
+            }
 
-    let mut owner_list = lock_table[sem_id].get_owner();
+            if !visited_threads.contains(&owner_tid) {
+                visited_threads.insert(owner_tid);
 
-    while let Some(owner_tid) = owner_list.pop() {
-        if owner_tid == tid {
-            return true;
-        }
-
-        if !visited_threads.contains(&tid) {
-            visited_threads.insert(tid);
-        }
-
-        if let Some(next_lock) = lock_table
-            .iter()
-            .find(|&item| item.get_wait_list().contains(&owner_tid))
-        {
-            owner_list = next_lock.get_owner();
+                if let Some(next_lock) = find_what_sem_is_thread_waiting_for(owner_tid) {
+                    stack.push(next_lock);
+                }
+            }
         }
     }
-
     false
+}
+
+fn find_what_sem_is_thread_waiting_for(tid: usize) -> Option<usize> {
+    let process = current_process();
+    let process_inner = process.inner_exclusive_access();
+    let task = &process_inner.tasks[tid];
+
+    let waiting = task
+        .as_ref()
+        .unwrap()
+        .inner_exclusive_access()
+        .sema_id_waiting_on;
+
+    waiting
 }
 
 fn _check_semaphore_deadlock2(
