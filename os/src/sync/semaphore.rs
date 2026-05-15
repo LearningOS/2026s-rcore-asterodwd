@@ -2,7 +2,7 @@
 
 use crate::sync::UPSafeCell;
 use crate::task::{block_current_and_run_next, current_task, wakeup_task, TaskControlBlock};
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
 /// semaphore structure
 pub struct Semaphore {
@@ -13,6 +13,7 @@ pub struct Semaphore {
 pub struct SemaphoreInner {
     pub count: isize,
     pub wait_queue: VecDeque<Arc<TaskControlBlock>>,
+    pub owner: Vec<usize>,
 }
 
 impl Semaphore {
@@ -24,6 +25,7 @@ impl Semaphore {
                 UPSafeCell::new(SemaphoreInner {
                     count: res_count as isize,
                     wait_queue: VecDeque::new(),
+                    owner: Vec::new(),
                 })
             },
         }
@@ -51,5 +53,18 @@ impl Semaphore {
             drop(inner);
             block_current_and_run_next();
         }
+    }
+
+    fn get_owner(&self) -> Vec<usize> {
+        self.inner.exclusive_access().owner.clone()
+    }
+
+    fn get_wait_list(&self) -> Vec<usize> {
+        self.inner
+            .exclusive_access()
+            .wait_queue
+            .iter()
+            .map(|task| task.inner_exclusive_access().res.as_ref().unwrap().tid)
+            .collect::<Vec<_>>()
     }
 }
