@@ -1,7 +1,7 @@
 use crate::sync::{Condvar, Mutex, MutexBlocking, MutexSpin, Semaphore};
 use crate::task::{block_current_and_run_next, current_process, current_task, ProcessControlBlock};
 use crate::timer::{add_timer, get_time_ms};
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 /// sleep syscall
 pub fn sys_sleep(ms: usize) -> isize {
     trace!(
@@ -217,12 +217,113 @@ pub fn sys_semaphore_down(sem_id: usize) -> isize {
             .tid
     );
     let process = current_process();
-    let process_inner = process.inner_exclusive_access();
-    let sem = Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap());
-    drop(process_inner);
+    let (sem, detect_deadlock) = {
+        let process_inner = process.inner_exclusive_access();
+        (
+            Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap()),
+            process_inner.detece_deadlock,
+        )
+    };
+
+    if detect_deadlock {
+        let tid = current_task()
+            .unwrap()
+            .inner_exclusive_access()
+            .res
+            .as_ref()
+            .unwrap()
+            .tid;
+        if check_semaphore_deadlock(tid, &process, sem_id) {
+            return -0xdead;
+        }
+    }
+
     sem.down();
     0
 }
+
+fn check_semaphore_deadlock(tid: usize, process: &Arc<ProcessControlBlock>, sem_id: usize) -> bool {
+    let mut visited_threads: BTreeSet<usize> = BTreeSet::new();
+
+    let process_inner = process.inner_exclusive_access();
+    let lock_table = process_inner.semaphore_list.clone();
+
+    let lock_table: Vec<_> = lock_table.clone().into_iter().flatten().collect();
+
+    let mut owner_list = lock_table[sem_id].get_owner();
+
+    while let Some(owner_tid) = owner_list.pop() {
+        if owner_tid == tid {
+            return true;
+        }
+
+        if !visited_threads.contains(&tid) {
+            visited_threads.insert(tid);
+        }
+
+        if let Some(next_lock) = lock_table
+            .iter()
+            .find(|&item| item.get_wait_list().contains(&owner_tid))
+        {
+            owner_list = next_lock.get_owner();
+        }
+    }
+
+    false
+}
+
+fn _check_semaphore_deadlock2(
+    tid: usize,
+    process: &Arc<ProcessControlBlock>,
+    sem_id: usize,
+) -> bool {
+    let mut visited_threads: BTreeSet<usize> = BTreeSet::new();
+
+    let process_inner = process.inner_exclusive_access();
+    let lock_table = process_inner.semaphore_list.clone();
+    drop(process_inner);
+
+    let lock_table: Vec<_> = lock_table.clone().into_iter().flatten().collect();
+
+    _dfs(tid, sem_id, &lock_table, &mut visited_threads)
+}
+
+fn _dfs(
+    tid: usize,
+    sem_id: usize,
+    lock_table: &[Arc<Semaphore>],
+    visited: &mut BTreeSet<usize>,
+) -> bool {
+    let target_lock = &lock_table[sem_id];
+    if target_lock.inner.exclusive_access().count > 0 {
+        return false;
+    }
+    let mut results = Vec::new();
+    let mut owner_list = lock_table[sem_id].get_owner();
+
+    while let Some(owner_tid) = owner_list.pop() {
+        if owner_tid == tid {
+            results.push(true);
+        }
+
+        if visited.contains(&tid) {
+            continue;
+        }
+
+        if let Some(next_lock) = lock_table
+            .iter()
+            .find(|&item| item.get_wait_list().contains(&owner_tid))
+        {
+            owner_list = next_lock.get_owner();
+            // dfs(owner_id, next_lock, lock_table, visited);
+        } else {
+            break;
+        }
+    }
+
+    results.iter().all(|item| *item)
+}
+
 /// condvar create syscall
 pub fn sys_condvar_create() -> isize {
     trace!(

@@ -1,7 +1,9 @@
 //! Semaphore
 
 use crate::sync::UPSafeCell;
-use crate::task::{block_current_and_run_next, current_task, wakeup_task, TaskControlBlock};
+use crate::task::{
+    block_current_and_run_next, current_process, current_task, wakeup_task, TaskControlBlock,
+};
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
 /// semaphore structure
@@ -34,8 +36,23 @@ impl Semaphore {
     /// up operation of semaphore
     pub fn up(&self) {
         trace!("kernel: Semaphore::up");
+        let detect_deadlock = {
+            let process = current_process();
+            let ret = process.inner_exclusive_access().detece_deadlock;
+            ret
+        };
+
         let mut inner = self.inner.exclusive_access();
         inner.count += 1;
+
+        if detect_deadlock {
+            let task = current_task().unwrap();
+            let tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
+            if let Some(pos) = inner.owner.iter().position(|&id| id == tid) {
+                inner.owner.remove(pos);
+            }
+        }
+
         if inner.count <= 0 {
             if let Some(task) = inner.wait_queue.pop_front() {
                 wakeup_task(task);
@@ -46,20 +63,39 @@ impl Semaphore {
     /// down operation of semaphore
     pub fn down(&self) {
         trace!("kernel: Semaphore::down");
+        let detect_deadlock = {
+            let process = current_process();
+            let ret = process.inner_exclusive_access().detece_deadlock;
+            ret
+        };
+
         let mut inner = self.inner.exclusive_access();
+
+        let task = current_task().unwrap();
+        let tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
+
         inner.count -= 1;
         if inner.count < 0 {
-            inner.wait_queue.push_back(current_task().unwrap());
+            inner.wait_queue.push_back(task);
             drop(inner);
             block_current_and_run_next();
+
+            if detect_deadlock {
+                let mut lock_inner = self.inner.exclusive_access();
+                lock_inner.owner.push(tid);
+            }
+        } else if detect_deadlock {
+            inner.owner.push(tid);
         }
     }
 
-    fn get_owner(&self) -> Vec<usize> {
+    /// get all owners of this semaphore
+    pub fn get_owner(&self) -> Vec<usize> {
         self.inner.exclusive_access().owner.clone()
     }
 
-    fn get_wait_list(&self) -> Vec<usize> {
+    /// get all threads that wait on this semaphore
+    pub fn get_wait_list(&self) -> Vec<usize> {
         self.inner
             .exclusive_access()
             .wait_queue
