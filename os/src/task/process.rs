@@ -7,7 +7,7 @@ use super::{add_task, SignalFlags};
 use super::{pid_alloc, PidHandle};
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{translated_refmut, MemorySet, KERNEL_SPACE};
-use crate::sync::{Condvar, Mutex, Semaphore, UPSafeCell};
+use crate::sync::{Condvar, DeadlockDetector, Mutex, Semaphore, UPSafeCell};
 use crate::trap::{trap_handler, TrapContext};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -50,7 +50,7 @@ pub struct ProcessControlBlockInner {
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
     /// enable detect deadlock
-    pub detece_deadlock: bool,
+    pub deadlock_detector: Option<DeadlockDetector<16, 16>>,
 }
 
 impl ProcessControlBlockInner {
@@ -83,6 +83,11 @@ impl ProcessControlBlockInner {
     /// get a task with tid in this process
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
+    }
+
+    /// check if enable detect deadlock
+    pub fn detect_deadlock_enabled(&self) -> bool {
+        self.deadlock_detector.is_some()
     }
 }
 
@@ -121,7 +126,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
-                    detece_deadlock: false,
+                    deadlock_detector: None,
                 })
             },
         });
@@ -248,7 +253,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
-                    detece_deadlock: false,
+                    deadlock_detector: None,
                 })
             },
         });

@@ -127,7 +127,10 @@ impl Mutex for MutexBlocking {
             mutex_inner.locked = true;
 
             trace!("before set owner");
-            if current_process().inner_exclusive_access().detece_deadlock {
+            if current_process()
+                .inner_exclusive_access()
+                .detect_deadlock_enabled()
+            {
                 trace!("setting owner after access current_process");
                 mutex_inner.owner.clear();
                 mutex_inner.owner.push(tid);

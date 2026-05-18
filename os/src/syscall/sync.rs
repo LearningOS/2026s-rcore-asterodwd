@@ -1,7 +1,9 @@
-use crate::sync::{Condvar, Mutex, MutexBlocking, MutexSpin, Semaphore};
+use crate::sync::{
+    Condvar, DeadlockDetector, ModifyType, Mutex, MutexBlocking, MutexSpin, Semaphore,
+};
 use crate::task::{block_current_and_run_next, current_process, current_task, ProcessControlBlock};
 use crate::timer::{add_timer, get_time_ms};
-use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 /// sleep syscall
 pub fn sys_sleep(ms: usize) -> isize {
     trace!(
@@ -72,7 +74,7 @@ pub fn sys_mutex_lock(mutex_id: usize) -> isize {
     let (mutex, detect_deadlock) = {
         let process_inner = process.inner_exclusive_access();
         let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
-        (mutex, process_inner.detece_deadlock)
+        (mutex, process_inner.detect_deadlock_enabled())
     };
 
     trace!("detece_deadlock = {}", detect_deadlock);
@@ -166,6 +168,8 @@ pub fn sys_semaphore_create(res_count: usize) -> isize {
     );
     let process = current_process();
     let mut process_inner = process.inner_exclusive_access();
+    let detect_deadlock = process_inner.detect_deadlock_enabled();
+
     let id = if let Some(id) = process_inner
         .semaphore_list
         .iter()
@@ -181,6 +185,11 @@ pub fn sys_semaphore_create(res_count: usize) -> isize {
             .push(Some(Arc::new(Semaphore::new(res_count))));
         process_inner.semaphore_list.len() - 1
     };
+
+    if detect_deadlock {
+        process_inner.deadlock_detector.as_mut().unwrap().available[id] = res_count;
+    }
+
     id as isize
 }
 /// semaphore up syscall
@@ -197,16 +206,33 @@ pub fn sys_semaphore_up(sem_id: usize) -> isize {
             .tid
     );
     let process = current_process();
-    let process_inner = process.inner_exclusive_access();
+    let mut process_inner = process.inner_exclusive_access();
+    let tid = current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .res
+        .as_ref()
+        .unwrap()
+        .tid;
+    let detect_deadlock = process_inner.detect_deadlock_enabled();
+
     let sem = Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap());
+
+    if detect_deadlock {
+        process_inner
+            .deadlock_detector
+            .as_mut()
+            .unwrap()
+            .modify_resource(ModifyType::Release, sem_id, tid);
+    }
     drop(process_inner);
     sem.up();
     0
 }
 /// semaphore down syscall
 pub fn sys_semaphore_down(sem_id: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] tid[{}] sys_semaphore_down",
+    debug!(
+        "kernel:pid[{}] tid[{}] sem_id[{}] sys_semaphore_down",
         current_task().unwrap().process.upgrade().unwrap().getpid(),
         current_task()
             .unwrap()
@@ -214,138 +240,47 @@ pub fn sys_semaphore_down(sem_id: usize) -> isize {
             .res
             .as_ref()
             .unwrap()
-            .tid
+            .tid,
+        sem_id
     );
     let process = current_process();
-    let (sem, detect_deadlock, lock_table) = {
+    let (sem, detect_deadlock) = {
         let process_inner = process.inner_exclusive_access();
         (
             Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap()),
-            process_inner.detece_deadlock,
-            process_inner.semaphore_list.clone(),
+            process_inner.detect_deadlock_enabled(),
         )
     };
 
-    let task = current_task().unwrap();
     if detect_deadlock {
-        let mut task_inner = task.inner_exclusive_access();
+        let mut process_inner = process.inner_exclusive_access();
+        let tid = current_task()
+            .unwrap()
+            .inner_exclusive_access()
+            .res
+            .as_ref()
+            .unwrap()
+            .tid;
 
-        let tid = task_inner.res.as_ref().unwrap().tid;
+        process_inner
+            .deadlock_detector
+            .as_mut()
+            .unwrap()
+            .modify_resource(ModifyType::Allocate, sem_id, tid);
 
-        task_inner.sema_id_waiting_on = Some(sem_id);
-        drop(task_inner);
-
-        if check_semaphore_deadlock(tid, sem_id, &lock_table) {
-            let mut task_inner = task.inner_exclusive_access();
-            task_inner.sema_id_waiting_on = None;
-            println!("detected!!!!!!!!!");
-            return -0xdead;
+        if process_inner
+            .deadlock_detector
+            .as_mut()
+            .unwrap()
+            .detect_deadlock()
+        {
+            return -0xDEAD;
         }
     }
 
     sem.down();
 
-    if detect_deadlock {
-        task.inner_exclusive_access().sema_id_waiting_on = None;
-    }
     0
-}
-
-fn check_semaphore_deadlock(
-    tid: usize,
-    sem_id: usize,
-    lock_table: &[Option<Arc<Semaphore>>],
-) -> bool {
-    let mut visited_threads: BTreeSet<usize> = BTreeSet::new();
-    let mut stack = Vec::new();
-    stack.push(sem_id);
-
-    while let Some(sem_id) = stack.pop() {
-        // I think there must be a semaphore with the sem_id
-        let sem_obj = lock_table[sem_id].as_ref().unwrap();
-        let own_list = sem_obj.get_owner();
-
-        for owner_tid in own_list {
-            if tid == owner_tid {
-                return true;
-            }
-
-            if !visited_threads.contains(&owner_tid) {
-                visited_threads.insert(owner_tid);
-
-                if let Some(next_lock) = find_what_sem_is_thread_waiting_for(owner_tid) {
-                    stack.push(next_lock);
-                }
-            }
-        }
-    }
-    false
-}
-
-fn find_what_sem_is_thread_waiting_for(tid: usize) -> Option<usize> {
-    let process = current_process();
-    let process_inner = process.inner_exclusive_access();
-    let task = &process_inner.tasks[tid];
-
-    let waiting = task
-        .as_ref()
-        .unwrap()
-        .inner_exclusive_access()
-        .sema_id_waiting_on;
-
-    waiting
-}
-
-fn _check_semaphore_deadlock2(
-    tid: usize,
-    process: &Arc<ProcessControlBlock>,
-    sem_id: usize,
-) -> bool {
-    let mut visited_threads: BTreeSet<usize> = BTreeSet::new();
-
-    let process_inner = process.inner_exclusive_access();
-    let lock_table = process_inner.semaphore_list.clone();
-    drop(process_inner);
-
-    let lock_table: Vec<_> = lock_table.clone().into_iter().flatten().collect();
-
-    _dfs(tid, sem_id, &lock_table, &mut visited_threads)
-}
-
-fn _dfs(
-    tid: usize,
-    sem_id: usize,
-    lock_table: &[Arc<Semaphore>],
-    visited: &mut BTreeSet<usize>,
-) -> bool {
-    let target_lock = &lock_table[sem_id];
-    if target_lock.inner.exclusive_access().count > 0 {
-        return false;
-    }
-    let mut results = Vec::new();
-    let mut owner_list = lock_table[sem_id].get_owner();
-
-    while let Some(owner_tid) = owner_list.pop() {
-        if owner_tid == tid {
-            results.push(true);
-        }
-
-        if visited.contains(&tid) {
-            continue;
-        }
-
-        if let Some(next_lock) = lock_table
-            .iter()
-            .find(|&item| item.get_wait_list().contains(&owner_tid))
-        {
-            owner_list = next_lock.get_owner();
-            // dfs(owner_id, next_lock, lock_table, visited);
-        } else {
-            break;
-        }
-    }
-
-    results.iter().all(|item| *item)
 }
 
 /// condvar create syscall
@@ -424,12 +359,18 @@ pub fn sys_condvar_wait(condvar_id: usize, mutex_id: usize) -> isize {
 /// enable deadlock detection syscall
 ///
 /// YOUR JOB: Implement deadlock detection, but might not all in this syscall
-pub fn sys_enable_deadlock_detect(_enabled: usize) -> isize {
+pub fn sys_enable_deadlock_detect(enabled: usize) -> isize {
     trace!("kernel: sys_enable_deadlock_detect NOT IMPLEMENTED");
 
     let process = current_process();
     let mut process_inner = process.inner_exclusive_access();
 
-    process_inner.detece_deadlock = true;
+    match enabled {
+        1 => {
+            process_inner.deadlock_detector = Some(DeadlockDetector::<16, 16>::new());
+        }
+        _ => process_inner.deadlock_detector = None,
+    }
+
     0
 }
